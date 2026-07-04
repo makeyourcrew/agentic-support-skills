@@ -1,0 +1,168 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/makeyourcrew/agentic-support-skills/main/skills/agentic-environment-settings/schemas/environment.schema.json",
+  "title": "Environment Configuration Manifest",
+  "description": "Declares every piece of configuration that a set of agents needs to run in a workspace. This file is the single source of truth for what must be configured, where it goes, and how to validate it.",
+  "type": "object",
+  "required": ["version", "requirements"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version of this environment manifest. Currently '1.0'. Bump when breaking changes are introduced so consumers can handle migrations.",
+      "const": "1.0"
+    },
+    "workspace": {
+      "type": "object",
+      "description": "Metadata about the workspace this manifest belongs to. Helps identify and organise configurations across multiple workspaces or environments.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable name of the workspace, e.g. 'SEO Team Workspace'."
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description of what this workspace does, e.g. 'Performs technical SEO audits and content optimization.'"
+        },
+        "environment": {
+          "type": "string",
+          "enum": ["development", "staging", "production"],
+          "description": "The deployment environment this manifest targets. Use 'development' for local work, 'staging' for pre-production testing, and 'production' for live deployments."
+        }
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "description": "Ordered list of configuration requirements. Each entry declares one piece of configuration the agents need. Order matters for deployment: items are processed top-to-bottom, so declare dependencies first.",
+      "items": {
+        "$ref": "#/$defs/requirement"
+      }
+    }
+  },
+  "$defs": {
+    "requirement": {
+      "type": "object",
+      "description": "A single configuration requirement. Describes what is needed, where it must be placed, whether it is mandatory, and how to obtain or generate its value.",
+      "required": ["key", "description", "type", "required"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Unique identifier for this requirement within the manifest. Use UPPER_SNAKE_CASE for environment variables (e.g. 'DEEPSEEK_API_KEY'), or a descriptive name for files and configs (e.g. 'agent-runner-config').",
+          "examples": ["DEEPSEEK_API_KEY", "PG_CONNECTION_STRING", "agents-config-json"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Clear, human-readable explanation of what this configuration controls and why the agents need it. This text is shown to users when they are asked to provide a value, so be specific: 'API key for the DeepSeek LLM service used by the Xerraire chat agent' is better than 'API key'.",
+          "minLength": 10
+        },
+        "type": {
+          "type": "string",
+          "enum": ["env", "secret", "file", "config"],
+          "description": "The kind of configuration this is:\n- 'env': A plain environment variable injected into the process environment.\n- 'secret': A sensitive value (password, token, key) that must be stored securely and never committed to version control.\n- 'file': A file that must exist at a specific path for the agents to read at runtime.\n- 'config': A structured configuration block (JSON, YAML, TOML) written to a file."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "If true, the agents cannot start without this value. If false, the value is optional and the agents should handle its absence gracefully (e.g. a feature toggle that defaults to off).",
+          "default": true
+        },
+        "target": {
+          "type": "string",
+          "description": "Where the value should be deployed. The format depends on the type:\n- For 'env' and 'secret': use 'env' (injected as process.env.KEY), 'envfile' (written to a .env file), or 'vault:<vault-name>' (stored in a secrets vault).\n- For 'file' and 'config': use a filesystem path, e.g. '/app/config/agents.json' or './data/settings.yaml'. Relative paths are relative to the workspace root.",
+          "examples": ["env", "envfile", "vault:agent-secrets", "/app/config/agents.json", "./data/settings.yaml"]
+        },
+        "defaultValue": {
+          "description": "A fallback value used when no explicit value is provided. Only meaningful when 'required' is false. The type matches whatever the configuration expects (string, number, boolean, object).",
+          "examples": ["localhost", 8080, false]
+        },
+        "example": {
+          "type": "string",
+          "description": "A non-sensitive example value to help users understand the expected format. This is never used at runtime — it is purely documentation. For secrets, use a clearly fake value like 'sk-xxxxx' or 'ghp_placeholder'.",
+          "examples": ["sk-xxxxxxxxxxxxxxxx", "postgres://user:pass@host:5432/db", "{\"model\":\"deepseek-v4-flash\"}"]
+        },
+        "format": {
+          "type": "string",
+          "enum": ["string", "number", "boolean", "json", "yaml", "toml", "text", "binary"],
+          "description": "Expected data format of the value. Helps the deployment tool know how to serialise or validate the input:\n- 'string', 'number', 'boolean': primitive values for env vars.\n- 'json', 'yaml', 'toml': structured formats for config blocks.\n- 'text': plain text file content.\n- 'binary': binary file (e.g. certificates, key files)."
+        },
+        "sensitive": {
+          "type": "boolean",
+          "description": "If true, the value must never be logged, printed, or written to non-secure storage. Automatically true when type is 'secret'. Set to true for 'env' values that contain sensitive data (tokens, passwords).",
+          "default": false
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Keys of other requirements that must be configured before this one. Use this to express ordering dependencies, e.g. a database config file that needs the database password to be set first.",
+          "examples": [["PG_PASSWORD", "PG_HOST"]]
+        },
+        "validation": {
+          "type": "object",
+          "description": "Optional validation rules to check the provided value before deployment.",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "A regular expression the value must match. Useful for API keys with known prefixes (e.g. '^sk-[a-zA-Z0-9]{32,}$') or URLs ('^https?://').",
+              "examples": ["^sk-[a-zA-Z0-9]+$", "^https?://.+\\..+"]
+            },
+            "minLength": {
+              "type": "integer",
+              "description": "Minimum number of characters required.",
+              "minimum": 0
+            },
+            "maxLength": {
+              "type": "integer",
+              "description": "Maximum number of characters allowed.",
+              "minimum": 0
+            },
+            "enum": {
+              "type": "array",
+              "description": "A fixed list of allowed values. Use when the configuration accepts only specific options (e.g. ['development', 'staging', 'production']).",
+              "items": {}
+            }
+          }
+        },
+        "source": {
+          "type": "string",
+          "enum": ["manual", "generated", "external", "inherited"],
+          "description": "How the value should be obtained:\n- 'manual': The user must provide this value (a prompt or form will be shown).\n- 'generated': The system can generate this value automatically (e.g. a self-signed certificate, a random secret).\n- 'external': The value comes from an external system (another API, a cloud secret manager, etc.). The 'externalRef' field describes where.\n- 'inherited': The value is inherited from a parent workspace or global configuration."
+        },
+        "externalRef": {
+          "type": "string",
+          "description": "When 'source' is 'external', this field describes where to find the value. Format depends on the external system, e.g. 'aws-secrets-manager:prod/deepseek-key', 'gcp-secret:projects/myproject/secrets/api-key', or 'url:https://internal-api/credentials'.",
+          "examples": ["aws-secrets-manager:prod/deepseek-key", "gcp-secret:projects/myproject/secrets/api-key"]
+        },
+        "agentScope": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of the agents that specifically need this configuration. If omitted, the configuration applies to all agents in the workspace. Use this to avoid cluttering an agent's environment with values it doesn't use.",
+          "examples": [["xerraire"], ["agent-runner"], ["xerraire", "agent-runner"]]
+        },
+        "notes": {
+          "type": "string",
+          "description": "Additional free-form notes for the user or deployment system. Use this for gotchas, warnings, or special instructions that don't fit other fields, e.g. 'This key expires every 90 days and must be rotated' or 'The file must be readable by the agent-runner service account'."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "secret" } }
+          },
+          "then": {
+            "properties": {
+              "sensitive": { "default": true }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": { "enum": ["file", "config"] }
+            }
+          },
+          "then": {
+            "required": ["target"]
+          }
+        }
+      ]
+    }
+  }
+}
