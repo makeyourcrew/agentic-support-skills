@@ -1,27 +1,42 @@
 ---
 name: agentic-environment-settings
 description: >
-  Identifies, validates, and configures all environment variables, secrets, files,
-  and structured configuration that a set of agents needs to run in a workspace.
-  Use when setting up a new agent workspace, preparing a deployment, debugging
-  missing configuration, generating an environment.json manifest, or validating
-  that all required configuration is present before launch. Triggers on
-  "environment setup", "configure agents", "missing variables", "secrets",
+  Analyzes all agents, tools, MCP servers, and services in a workspace and generates
+  the environment.json manifest that declares every piece of configuration the workspace
+  needs to run. The skill IS the tool that produces the file — it scans code, inspects
+  agents and their tools, reads Dockerfiles and deployment manifests, and writes the
+  complete environment.json to the repository root. Use when setting up a new agent
+  workspace, preparing a deployment, debugging missing configuration, generating or
+  updating an environment.json manifest, or auditing what a workspace needs.
+  Triggers on "environment setup", "configure agents", "missing variables", "secrets",
   "deployment config", "environment.json", "workspace setup", "agent configuration",
-  "prepare environment", or "what does this workspace need".
+  "prepare environment", "what does this workspace need", or "scan workspace".
 ---
 
 # Agentic Environment Settings
 
-## What This Skill Does
+## Responsibility
 
-This skill manages the full lifecycle of configuration for agent workspaces:
+**This skill is the active agent that produces `environment.json`.** It does not just
+give instructions — it scans, analyzes, and writes the output file.
 
-1. **Discover** — Scans the workspace to find every piece of configuration the agents need.
-2. **Manifest** — Creates or updates an `environment.json` file that declares all requirements.
-3. **Validate** — Checks that every requirement has a value and that values match expected formats.
-4. **Prepare** — Generates templates, prompts the user for missing values, and resolves external secrets.
-5. **Deploy** — Writes the final configuration to the correct targets (env vars, .env files, vault entries, config files).
+When invoked, the skill must:
+
+1. **Scan every agent definition** (`.opencode/agents/*.md`, agent config files) to understand what each agent does, which tools it uses, and which external services it talks to.
+2. **Scan every tool and MCP server** configuration (`.opencode/tool/`, `.opencode/mcp.json`, `opencode.json`) to find tool-level configuration needs (API keys, connection strings, permissions).
+3. **Scan all source code** for `process.env.*`, `os.Getenv()`, config file reads, vault calls, cloud SDK initializations, database connections, and API client constructors.
+4. **Scan deployment manifests** (Dockerfiles, docker-compose, Kubernetes YAML, CI/CD pipelines) for `env:`, `secretKeyRef:`, `envFrom:`, build args.
+5. **Cross-reference all findings** to produce a single deduplicated `environment.json` at the repository root that covers every agent, tool, and service.
+
+The output `environment.json` is the authoritative manifest. No other file should be needed to understand what configuration the workspace requires.
+
+## Lifecycle
+
+1. **Discover** — Scan the workspace to find every configuration dependency (agents, tools, code, deployments).
+2. **Manifest** — Generate the `environment.json` file at the repository root declaring all requirements.
+3. **Validate** — Check that every requirement has a value and that values match expected formats.
+4. **Prepare** — Generate templates, prompt for missing values, resolve external secrets.
+5. **Deploy** — Write the final configuration to the correct targets (env vars, .env files, vault entries, config files).
 
 ## Core Concept: `environment.json`
 
@@ -73,27 +88,81 @@ The `environment.json` file is the single source of truth for what a workspace n
 
 ### Phase 1: Discovery
 
-The goal is to find every configuration dependency in the workspace.
+The goal is to find **every** configuration dependency in the workspace by scanning
+agents, tools, source code, and deployment manifests.
 
-**What to search for:**
+#### 1a. Agent Analysis
+
+Scan every agent definition to understand what configuration each agent needs:
+
+| Source | What to look for |
+|---|---|
+| `.opencode/agents/*.md` | System prompts that reference external services, API keys, tool requirements. Agent frontmatter (`mode`, `tools`, `permission`). Mentions of databases, APIs, external integrations. |
+| Agent config / tools section | Declared tool permissions that imply config needs (e.g. `github` tool → needs GitHub token, `database` tool → needs connection string). |
+| Agent instructions referencing files | If an agent references reading/writing specific paths, those paths may need to exist and be writable. |
+| Agent instructions referencing external services | If an agent mentions "call the API", "query the database", "authenticate with", extract the implied service and add a requirement. |
+
+For each agent, produce a summary:
+```
+Agent: <name>
+  File: <path>
+  Mode: <primary|subagent|all>
+  Tools: <list>
+  External services referenced: <list>
+  Env vars referenced: <list>
+  Files referenced: <list>
+```
+
+#### 1b. Tool & MCP Server Analysis
+
+Scan every tool and MCP server configuration:
+
+| Source | What to look for |
+|---|---|
+| `.opencode/mcp.json` / `opencode.json` | MCP server definitions with `env`, `command`, `args`. Each env entry is a configuration requirement. |
+| `.opencode/tool/` | Tool definitions that reference env vars or need credentials. |
+| `package.json` / `go.mod` dependencies | SDKs that imply config needs (e.g. `@google-cloud/firestore` → needs service account, `pg` → needs connection string). |
+| `.skills/` directories | Skills that reference env vars or external services in their instructions. |
+
+#### 1c. Source Code Analysis
+
+Grep all source files for configuration patterns:
 
 | Pattern | What it means | How to find it |
 |---|---|---|
-| `process.env.XXX` | Environment variable dependency | Grep source code for `process.env.` |
+| `process.env.XXX` (JS/TS) | Environment variable dependency | `grep -rn "process\.env\." --include="*.js" --include="*.ts"` |
+| `os.Getenv("XXX")` / `os.LookupEnv` (Go) | Go env var | `grep -rn "os\.Getenv\|os\.LookupEnv"` |
+| `os.environ.get` / `os.environ["XXX"]` (Python) | Python env var | `grep -rn "os\.environ"` |
 | `.env` / `.env.local` / `.env.production` | Environment file usage | Look for dotenv imports and `.env*` files |
 | Vault / secrets manager calls | Secret dependencies | Grep for `vault`, `getSecret`, `SecretManager`, `secrets.get` |
-| Config file reads | File-based configuration | Grep for `readFile`, `fs.readFile`, `loadConfig`, `require('./config')`, `import.*config` |
-| Cloud SDK initializations | Cloud provider credentials | Grep for `AWS_`, `GCP_`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_` |
-| Database connection strings | Database config | Grep for `postgres://`, `mongodb://`, `DATABASE_URL`, `DB_HOST` |
-| API client constructors | External API dependencies | Grep for `new Client`, `apiKey`, `api_key`, `bearerToken` |
-| Docker / Kubernetes config | Container config | Read `Dockerfile`, `docker-compose.yml`, `k8s/*.yaml` for `env:`, `envFrom:`, `secretKeyRef:` |
-| CI/CD config | Build/deploy-time config | Read `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile` |
+| Config file reads | File-based configuration | Grep for `readFile`, `fs.readFile`, `loadConfig`, `require('./config')`, `import.*config`, `os.ReadFile` |
+| Cloud SDK initializations | Cloud provider credentials | Grep for `AWS_`, `GCP_`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_`, `firebase`, `admin.initializeApp` |
+| Database connection strings | Database config | Grep for `postgres://`, `mongodb://`, `DATABASE_URL`, `DB_HOST`, `sql.Open` |
+| API client constructors | External API dependencies | Grep for `new Client`, `apiKey`, `api_key`, `bearerToken`, `Authorization` |
+| TLS / crypto material | Certificate needs | Grep for `tls.Config`, `cert`, `key.pem`, `ca.crt` |
 
-**Output of discovery:** A list of findings, each with:
+#### 1d. Deployment Manifest Analysis
+
+| Source | What to look for |
+|---|---|
+| `Dockerfile` | `ENV`, `ARG`, `COPY` of config/secrets, `VOLUME` mounts |
+| `docker-compose.yml` | `environment:`, `env_file:`, `secrets:`, `volumes:` for config files |
+| `k8s/*.yaml` | `env:`, `envFrom:`, `secretKeyRef:`, `configMapRef:`, `volumeMounts:` for config |
+| `.github/workflows/` | `env:` and `secrets.` references in CI steps |
+
+#### 1e. Skills Analysis
+
+| Source | What to look for |
+|---|---|
+| `.skills/*/SKILL.md` | Skill instructions that reference env vars, external services, or require credentials |
+| `skills/*/SKILL.md` | Same as above (different common location) |
+
+**Output of discovery:** A deduplicated list of findings, each with:
 - The key/variable name
-- Where it was found (file:line)
+- Where it was found (file:line, agent name, tool name)
 - What it appears to control (based on context)
 - Whether it looks sensitive (contains "key", "secret", "password", "token", "credential")
+- Which agent(s) or service(s) use it
 
 ### Phase 2: Manifest Creation
 
